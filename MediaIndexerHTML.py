@@ -128,6 +128,8 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Dict, List, Optional, Tuple, Any
 import socket
 import errno
+from html import unescape
+
 
 # Disable detailed logging for client disconnects
 import logging
@@ -156,6 +158,64 @@ try:
 except ImportError:
     HAS_CAIROSVG = False
     print("⚠️ cairosvg nicht installiert. Farbige Thumbnails werden eingeschränkt.")
+
+# -----------------------------------------------------------------------------
+# PLUGIN SYSTEM INITIALIZATION
+# -----------------------------------------------------------------------------
+
+print("🔌 DEBUG: Plugin System Check...")
+try:
+    from plugins import plugin_manager
+    print("✅ Plugin Manager importiert")
+    
+    plugin_manager.load_plugins()
+    print(f"✅ {len(plugin_manager.plugins)} Plugin(s) geladen")
+    
+    plugin_html = plugin_manager.get_all_settings_html()
+    print(f"✅ Plugin HTML geladen: {len(plugin_html)} Zeichen")
+    
+except Exception as e:
+    print(f"❌ Plugin Fehler: {e}")
+    import traceback
+    traceback.print_exc()
+    
+    # Fallback: Robustes Dummy Plugin Manager
+    class RobustDummyPluginManager:
+        def __init__(self): 
+            self.plugins = {}
+            self.hooks = {}
+            print("✅ Dummy Plugin Manager initialisiert (Plugin-Ordner fehlt)")
+        
+        def trigger_hook(self, hook_name, *args, **kwargs):
+            """Sicheres Triggern von Hooks mit vollständiger Fehlerbehandlung."""
+            print(f"🔌 Dummy Plugin Manager: Hook '{hook_name}' aufgerufen (keine Plugins geladen)")
+            
+            # Für bestimmte wichtige Hooks, geben wir leere Ergebnisse zurück
+            if hook_name in ['settings.save', 'settings.load']:
+                return []
+            
+            # Für HTML-Hooks, geben wir leere Strings zurück
+            if hook_name in ['html.header', 'html.settings']:
+                return []
+            
+            return []
+        
+        def get_all_settings_html(self):
+            """Leeres HTML für Settings."""
+            return ""
+        
+        # Optionale zusätzliche Methoden für Kompatibilität
+        def load_plugins(self):
+            print("ℹ️ Dummy Plugin Manager: Keine Plugins zu laden (Plugin-Ordner fehlt)")
+            return True
+        
+        def register_hook(self, hook_name, callback):
+            print(f"ℹ️ Dummy Plugin Manager: Hook '{hook_name}' registriert")
+            if hook_name not in self.hooks:
+                self.hooks[hook_name] = []
+            self.hooks[hook_name].append(callback)
+    
+    plugin_manager = RobustDummyPluginManager()
 
 # -----------------------------------------------------------------------------
 # KONFIGURATION & GLOBALE EINSTELLUNGEN
@@ -853,14 +913,11 @@ def escape_html(text):
     """
     if not text:
         return ''
-    return (
-        str(text)
-        .replace('&', '&amp;')
-        .replace('<', '&lt;')
-        .replace('>', '&gt;')
-        .replace('"', '&quot;')
-        .replace("'", '&#39;')
-    )
+    
+    # Importiere html Modul für escaping
+    from html import escape
+    
+    return escape(str(text))
 
 def get_category_icon(category):
     """
@@ -3579,7 +3636,8 @@ class ExtendedMediaHTTPRequestHandler(BaseHTTPRequestHandler):
 
         # Pfad dekodieren
         filepath = urllib.parse.unquote(filepath)
-        filepath = html.unescape(filepath)
+        from html import unescape
+        filepath = unescape(filepath)
 
         # Sicherheitsprüfung
         real_path = os.path.realpath(filepath)
@@ -3728,7 +3786,8 @@ class ExtendedMediaHTTPRequestHandler(BaseHTTPRequestHandler):
 
         # Pfad dekodieren
         filepath = urllib.parse.unquote(filepath)
-        filepath = html.unescape(filepath)
+        from html import unescape
+        filepath = unescape(filepath)
 
         print(f"📥 /media Anfrage für: {os.path.basename(filepath)}")
         print(f"   📍 Vollständiger Pfad: {filepath}")
@@ -4537,8 +4596,9 @@ class ExtendedMediaHTTPRequestHandler(BaseHTTPRequestHandler):
     # ===== API ENDPOINTS FÜR ERWEITERTE FEATURES =====
     
     def handle_api_settings(self, query_params):
-        """GET /api/settings - Alle Settings abrufen."""
+        """GET /api/settings - Alle Settings abrufen MIT Plugin-Settings"""
         try:
+            # Lade Haupt-Settings
             settings = {
                 'network_mode': get_setting('network_mode', 'localhost'),
                 'max_clients': get_setting('max_clients', 3),
@@ -4553,37 +4613,132 @@ class ExtendedMediaHTTPRequestHandler(BaseHTTPRequestHandler):
                 'server_port': SERVER_PORT
             }
             
-            self.send_json_response({'success': True, 'settings': settings})
+            # 🔧 KORREKTUR: Plugin-Settings aus DB laden und MERGEN
+            plugin_settings_json = get_setting('plugin_settings', '{}')  # Default leeres JSON
+            
+            try:
+                plugin_settings = json.loads(plugin_settings_json)
+                print(f"🔌 Plugin-Settings aus DB geladen: {len(plugin_settings)} Einträge")
+                
+                # Füge ALLE Plugin-Settings zu den Haupt-Settings hinzu
+                for key, value in plugin_settings.items():
+                    # Nur gültige Keys (beginnend mit 'plugin.')
+                    if isinstance(key, str) and key.startswith('plugin.'):
+                        settings[key] = value
+                        
+            except Exception as e:
+                print(f"⚠️ Plugin-Settings JSON Parse Fehler: {e}")
+                plugin_settings = {}
+            
+            # 🔧 WICHTIGSTE KORREKTUR: Plugin Hooks für settings.load aufrufen
+            try:
+                print(f"🔌 Rufe Plugin 'settings.load' Hooks auf...")
+                # 🔧 SICHERHEITS-CHECK: Prüfe ob plugin_manager existiert und die Methode hat
+                if hasattr(plugin_manager, 'trigger_hook'):
+                    plugin_load_results = plugin_manager.trigger_hook('settings.load', settings)
+                    print(f"🔌 Plugin 'settings.load' Results: {len(plugin_load_results) if plugin_load_results else 0}")
+                else:
+                    print(f"⚠️ plugin_manager hat keine trigger_hook Methode")
+            except Exception as e:
+                print(f"⚠️ Plugin 'settings.load' Hook Fehler: {e}")
+                import traceback
+                traceback.print_exc()
+            
+            response = {
+                'success': True,
+                'settings': settings,
+                'has_plugin_settings': len(plugin_settings) > 0,
+                'plugin_settings_count': len(plugin_settings)
+            }
+            
+            self.send_json_response(response)
             
         except Exception as e:
+            print(f"❌ Settings-API-Fehler: {e}")
+            import traceback
+            traceback.print_exc()
             self.send_json_response({'success': False, 'error': str(e)}, 500)
     
     def handle_settings_update(self, data):
-        """POST /api/settings/update - Settings aktualisieren."""
+        """POST /api/settings/update - Settings aktualisieren mit Plugin-Support"""
         try:
+            print(f"⚙️ Settings Update empfangen: {data.keys() if isinstance(data, dict) else 'ungültig'}")
+            
+            if not isinstance(data, dict):
+                self.send_json_response({'success': False, 'error': 'Ungültige Daten'}, 400)
+                return
+            
             updated = []
+            errors = []
+            plugin_settings = {}
             
+            # 1. Haupt-Settings speichern UND Plugin-Settings sammeln
             for key, value in data.items():
+                print(f"   🔍 Verarbeite Key: '{key}' = {value}")
+                
                 if key in DEFAULT_SETTINGS:
-                    if set_setting(key, value):
-                        updated.append(key)
+                    try:
+                        if set_setting(key, value):
+                            updated.append(key)
+                            print(f"   ✅ Setting '{key}' gespeichert")
+                        else:
+                            errors.append(f"Speichern von '{key}' fehlgeschlagen")
+                    except Exception as e:
+                        errors.append(f"Fehler bei '{key}': {str(e)}")
+                elif key.startswith('plugin.'):
+                    # Plugin-Settings speichern
+                    plugin_settings[key] = value
+                    print(f"   📝 Plugin-Setting gefunden: '{key}'")
             
-            # Bei network_mode Änderung Info ausgeben
-            if 'network_mode' in updated:
-                self.send_json_response({
-                    'success': True,
-                    'updated': updated,
-                    'restart_required': True,
-                    'message': 'Server-Neustart erforderlich für Netzwerk-Modus-Änderung'
-                })
+            print(f"   🔌 Gefundene Plugin-Settings: {len(plugin_settings)}")
+            
+            # 2. Plugin-Settings als JSON in der DB speichern
+            if plugin_settings:
+                print(f"   🔌 Plugin Settings speichere: {list(plugin_settings.keys())}")
+                
+                try:
+                    # Speichere Plugin-Settings als JSON-String
+                    set_setting('plugin_settings', json.dumps(plugin_settings))
+                    print(f"   ✅ Plugin-Settings in DB gespeichert: {len(plugin_settings)} Einträge")
+                    
+                    # Trigger Plugin save hooks (falls Plugins ihre eigenen Speichermechanismen haben)
+                    try:
+                        plugin_results = plugin_manager.trigger_hook('settings.save')
+                        if plugin_results:
+                            print(f"   🔌 Plugin save hooks ausgelöst: {len(plugin_results)} Ergebnisse")
+                    except Exception as e:
+                        print(f"   ⚠️ Plugin Hook Fehler: {e}")
+                        
+                except Exception as e:
+                    print(f"   ❌ Plugin-Settings Speichern fehlgeschlagen: {e}")
+                    errors.append(f"Plugin-Settings: {str(e)}")
             else:
-                self.send_json_response({
-                    'success': True,
-                    'updated': updated,
-                    'restart_required': False
-                })
+                print(f"   ⚠️ KEINE Plugin-Settings im Request gefunden!")
+                    
+            # 3. Response
+            response_data = {
+                'success': True,
+                'updated': updated,
+                'plugin_settings_saved': len(plugin_settings) > 0,
+                'plugin_count': len(plugin_settings),
+                'plugin_keys': list(plugin_settings.keys()) if plugin_settings else [],
+                'restart_required': False
+            }
+            
+            if 'network_mode' in updated:
+                response_data['restart_required'] = True
+                response_data['message'] = 'Server-Neustart erforderlich für Netzwerk-Modus-Änderung'
+            
+            if errors:
+                response_data['warnings'] = errors
+            
+            print(f"   ✅ Settings Update abgeschlossen: {len(updated)} Haupt-Einstellungen, {len(plugin_settings)} Plugin-Settings")
+            self.send_json_response(response_data)
             
         except Exception as e:
+            print(f"❌ Settings-Update-Fehler: {e}")
+            import traceback
+            traceback.print_exc()
             self.send_json_response({'success': False, 'error': str(e)}, 500)
     
     def handle_api_resume(self, query_params):
@@ -4637,46 +4792,116 @@ class ExtendedMediaHTTPRequestHandler(BaseHTTPRequestHandler):
             self.send_json_response({'success': False, 'error': str(e)}, 500)
     
     def handle_history_add(self, data):
-        """POST /api/history/add - History-Eintrag hinzufügen."""
+        """POST /api/history/add - History-Eintrag hinzufügen mit besserer Fehlerbehandlung"""
         try:
-            required = ['filepath', 'filename', 'category']
-            if not all(k in data for k in required):
-                self.send_json_response({'success': False, 'error': 'Fehlende Pflichtfelder'}, 400)
+            print(f"📝 History Add empfangen: {type(data)}")
+            
+            # Prüfe ob History aktiviert ist
+            if not get_setting('enable_history', True):
+                self.send_json_response({'success': True, 'ignored': 'history_disabled'})
                 return
             
-            # Extrahiere und konvertiere Werte sicher
-            filepath = data['filepath']
-            filename = data['filename']
-            category = data['category']
-            position = data.get('position', 0)
-            duration = data.get('duration', 0)
-            completed = data.get('completed', False)
+            # FIX: Validiere Daten-Typ
+            if not isinstance(data, dict):
+                print(f"❌ Ungültiger Datentyp: {type(data)}")
+                self.send_json_response({'success': False, 'error': 'Ungültiger Datentyp'}, 400)
+                return
             
-            # Konvertiere zu numerischen Werten (falls sie als Strings kommen)
+            # Validiere Pflichtfelder mit besseren Debug-Infos
+            required = ['filepath', 'filename', 'category']
+            missing = [field for field in required if field not in data]
+            
+            if missing:
+                print(f"❌ Fehlende Pflichtfelder: {missing}")
+                print(f"   Vorhandene Felder: {list(data.keys())}")
+                self.send_json_response({'success': False, 'error': f'Fehlende Pflichtfelder: {missing}'}, 400)
+                return
+            
+            # Extrahiere Werte mit sicheren Defaults
+            filepath = str(data['filepath']).strip()
+            filename = str(data['filename']).strip()
+            category = str(data['category']).strip()
+            
+            # Position und Duration mit Fehlerbehandlung
             try:
-                position = float(position) if position not in [None, ''] else 0
-            except:
+                position_str = data.get('position', '0')
+                position = float(position_str) if position_str else 0
+            except (ValueError, TypeError) as e:
+                print(f"⚠️ Position Konvertierungsfehler: {e}, Wert: {data.get('position')}")
                 position = 0
                 
             try:
-                duration = float(duration) if duration not in [None, ''] else 0
-            except:
+                duration_str = data.get('duration', '0')
+                duration = float(duration_str) if duration_str else 0
+            except (ValueError, TypeError) as e:
+                print(f"⚠️ Duration Konvertierungsfehler: {e}, Wert: {data.get('duration')}")
                 duration = 0
             
-            success = add_to_history(
-                filepath=filepath,
-                filename=filename,
-                category=category,
-                position=position,
-                duration=duration,
-                completed=completed
-            )
+            completed = bool(data.get('completed', False))
             
-            self.send_json_response({'success': success})
+            # FIX: Prüfe ob position und duration gültige Zahlen sind
+            def is_nan(value):
+                """Prüft ob ein Wert NaN ist."""
+                try:
+                    import math
+                    return math.isnan(float(value))
+                except:
+                    return True
+            
+            if is_nan(position):
+                position = 0
+            if is_nan(duration):
+                duration = 0
+            
+            # Debug-Ausgabe
+            print(f"   📊 History-Daten: {filename}")
+            print(f"   📍 Position: {position:.2f}s, Duration: {duration:.2f}s")
+            print(f"   📁 Category: {category}, Completed: {completed}")
+            
+            # Prüfe ob position < duration
+            if duration > 0 and position >= duration:
+                completed = True
+                position = duration
+                print(f"   ✅ Automatisch als completed markiert (Ende erreicht)")
+            
+            # Add to history (mit Fehlerbehandlung)
+            try:
+                success = add_to_history(
+                    filepath=filepath,
+                    filename=filename,
+                    category=category,
+                    position=position,
+                    duration=duration,
+                    completed=completed
+                )
+                
+                if success:
+                    print(f"   ✅ History gespeichert: {filename} ({position:.1f}s/{duration:.1f}s)")
+                    self.send_json_response({'success': True, 'saved': True})
+                else:
+                    print(f"   ⚠️ History-Speicherung fehlgeschlagen (DB-Fehler)")
+                    self.send_json_response({'success': False, 'error': 'Speichern fehlgeschlagen'}, 500)
+                    
+            except Exception as e:
+                print(f"   ❌ History-DB Fehler: {e}")
+                import traceback
+                traceback.print_exc()
+                self.send_json_response({'success': False, 'error': f'DB-Fehler: {str(e)}'}, 500)
             
         except Exception as e:
-            print(f"⚠️ History-Add API Fehler: {e}")
-            self.send_json_response({'success': False, 'error': str(e)}, 500)
+            print(f"❌ History-Add API Fehler: {e}")
+            import traceback
+            traceback.print_exc()
+            self.send_json_response({'success': False, 'error': f'API-Fehler: {str(e)}'}, 500)
+
+
+    # 🔥 FIX: Hilfsfunktion für NaN-Prüfung
+    def isNaN(value):
+        """Prüft ob ein Wert NaN ist."""
+        try:
+            return float(value) != float(value)  # NaN ist der einzige Wert der nicht gleich sich selbst ist
+        except:
+            return True
     
     def handle_history_clear(self):
         """POST /api/history/clear - Gesamte History löschen."""
@@ -4940,6 +5165,36 @@ def generate_html_with_subgenres(categories, category_data, genres, years,
     Returns:
         str: Komplettes HTML-Dokument
     """
+
+    # ===== PLUGIN INTEGRATION =====
+    plugin_header_js = ""
+    plugin_settings_html = ""
+    
+    try:
+        # Trigger Hook für Header-JavaScript
+        header_results = plugin_manager.trigger_hook('html.header')
+        if header_results:
+            plugin_header_js = '\n'.join(header_results)
+            print(f"✅ Plugin Header JavaScript gesammelt: {len(plugin_header_js)} Zeichen")
+        
+        # Trigger Hook für Settings-HTML
+        settings_results = plugin_manager.trigger_hook('html.settings')
+        if settings_results:
+            plugin_settings_html = '\n'.join(settings_results)
+            print(f"✅ Plugin Settings HTML gesammelt: {len(plugin_settings_html)} Zeichen")
+            
+    except Exception as e:
+        print(f"⚠️ Plugin-Integration Fehler: {e}")
+        import traceback
+        traceback.print_exc()
+
+    # 4. WICHTIG: Debug-Ausgabe um zu sehen was in HTML kommt
+    print(f"\n🔍 DEBUG Plugin Integration:")
+    print(f"   Header JS Länge: {len(plugin_header_js)}")
+    print(f"   Settings HTML Länge: {len(plugin_settings_html)}")
+    print(f"   Header enthält '<script>': {'<script>' in plugin_header_js}")
+    print(f"   Settings enthält 'Crossfade': {'Crossfade' in plugin_settings_html}")
+
     # Metadaten
     current_date = datetime.now().strftime("%d.%m.%Y %H:%M")
     current_year = datetime.now().year
@@ -5097,8 +5352,11 @@ def generate_html_with_subgenres(categories, category_data, genres, years,
     html_template = '''<!DOCTYPE html>
 <html lang="de">
 <head>
+    <!-- Plugin JavaScript -->
+    {plugin_header_js}
+    <!-- Rest des Headers -->
     <meta charset="UTF-8">
-    <meta name="media-cache" content="{{get_cache_version()}}">
+    <meta name="media-cache" content="{cache_version}">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>🎬 Private Media Collection v1.0</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
@@ -6479,6 +6737,9 @@ def generate_html_with_subgenres(categories, category_data, genres, years,
                     <option value="true">Aktiviert</option>
                 </select>
             </div>
+            
+            <!-- PLUGIN SETTINGS (DYNAMISCH VOM SERVER GENERIERT) -->
+            {plugin_settings_html}
         </div>
         <div class="settings-footer">
             <button class="btn btn-secondary" onclick="hideSettingsPanel()">Abbrechen</button>
@@ -6563,7 +6824,7 @@ def generate_html_with_subgenres(categories, category_data, genres, years,
     <script>
         const allMedia = {all_media_json_str};
         const categoryData = {category_data_json};
-        const CACHE_VERSION = "{{get_cache_version()}}";
+        const CACHE_VERSION = "{cache_version}";
         console.log('Media Cache Version:', CACHE_VERSION);
 
         // Speichere Cache-Version in sessionStorage
@@ -6609,6 +6870,9 @@ def generate_html_with_subgenres(categories, category_data, genres, years,
                 if (data.success) {{
                     const settings = data.settings;
                     
+                    console.log('🔌 Empfangene Settings:', Object.keys(settings));
+                    
+                    // 1. ZUERST Haupt-Settings laden
                     document.getElementById('networkMode').value = settings.network_mode;
                     document.getElementById('maxClients').value = settings.max_clients;
                     document.getElementById('enableHistory').value = settings.enable_history.toString();
@@ -6628,12 +6892,81 @@ def generate_html_with_subgenres(categories, category_data, genres, years,
                     updateAutoplayToggle();
                     
                     updateNetworkInfo(settings);
-
+                    
                     window.settingsLoaded = true;
+                    
+                    // 🔥 2. DANACH Plugin-Settings ins UI laden
+                    console.log('🔌 Lade Plugin-Settings ins UI...');
+                    
+                    // Warte bis DOM vollständig geladen ist
+                    if (document.readyState === 'loading') {{
+                        document.addEventListener('DOMContentLoaded', () => {{
+                            applyPluginSettingsToUI(settings);
+                        }});
+                    }} else {{
+                        // Kleine Verzögerung damit Plugin-Elemente existieren
+                        setTimeout(() => applyPluginSettingsToUI(settings), 100);
+                    }}
+                    
+                    console.log('✅ Settings geladen mit', Object.keys(settings).length, 'Einträgen');
+                    
                 }}
             }} catch (error) {{
-                console.error('Fehler beim Laden der Einstellungen:', error);
+                console.error('❌ Fehler beim Laden der Einstellungen:', error);
                 window.settingsLoaded = true;
+            }}
+        }}
+
+        // 🔥 NEUE FUNKTION: Plugin-Settings ins UI laden
+        function applyPluginSettingsToUI(settings) {{
+            const pluginInputs = document.querySelectorAll('[data-plugin-setting]');
+            console.log(`🔍 Gefundene Plugin-Inputs für UI: ${{pluginInputs.length}}`);
+            
+            pluginInputs.forEach(input => {{
+                const key = input.getAttribute('data-plugin-setting');
+                const value = settings[key];
+                
+                if (value !== undefined) {{
+                    if (input.type === 'checkbox') {{
+                        input.checked = Boolean(value);
+                    }} else if (input.type === 'range') {{
+                        input.value = parseFloat(value);
+                        // Optional: Value-Anzeige aktualisieren
+                        const valueDisplay = document.getElementById(key + 'Value');
+                        if (valueDisplay) {{
+                            valueDisplay.textContent = value + 's';
+                        }}
+                    }} else if (input.type === 'select-one') {{
+                        input.value = String(value);
+                    }} else {{
+                        input.value = String(value);
+                    }}
+                    
+                    console.log(`   ✅ Plugin UI: ${{key}} = ${{value}}`);
+                }}
+            }});
+            
+            // 🔥 3. Plugin-Settings an Plugins weitergeben (für JavaScript-Logik)
+            try {{
+                if (window.applyPluginSettings) {{
+                    console.log('🔌 Wende Plugin-Settings an JavaScript-Logik...');
+                    window.applyPluginSettings(settings);
+                }}
+            }} catch (e) {{
+                console.error('🔌 Plugin Settings JavaScript Fehler:', e);
+            }}
+        }}
+        
+        // Hilfsfunktion für verzögertes Plugin-Settings-Laden
+        function applyPluginSettingsDelayed(settings) {{
+            try {{
+                if (window.applyPluginSettings) {{
+                    window.applyPluginSettings(settings);
+                }}
+                
+                console.log('✅ Plugin Settings angewendet (nach UI-Load)');
+            }} catch (e) {{
+                console.log('Plugin Settings Laden Fehler:', e);
             }}
         }}
         
@@ -6648,47 +6981,77 @@ def generate_html_with_subgenres(categories, category_data, genres, years,
             }}
         }}
         
-        async function saveSettings() {{
-            try {{
-                const newVolumeLevel = parseFloat(document.getElementById('volumeSlider').value);
+    async function saveSettings() {{
+        try {{
+            const newVolumeLevel = parseFloat(document.getElementById('volumeSlider').value);
+            
+            const settings = {{
+                network_mode: document.getElementById('networkMode').value,
+                max_clients: parseInt(document.getElementById('maxClients').value),
+                enable_history: document.getElementById('enableHistory').value === 'true',
+                volume_level: newVolumeLevel,
+                audio_language: document.getElementById('audioLanguage').value,
+                autoplay_enabled: document.getElementById('autoplaySetting').value === 'true'
+            }};
+
+            // 🔥 WICHTIG: Plugin Settings sammeln AUS DEM UI
+            const pluginSettings = {{}};
+            
+            // Suche ALLE Plugin-Einstellungen im DOM
+            const pluginInputs = document.querySelectorAll('[data-plugin-setting]');
+            console.log(`🔍 Gefundene Plugin-Inputs: ${{pluginInputs.length}}`);
+            
+            pluginInputs.forEach(input => {{
+                const key = input.getAttribute('data-plugin-setting');
+                let value;
                 
-                const settings = {{
-                    network_mode: document.getElementById('networkMode').value,
-                    max_clients: parseInt(document.getElementById('maxClients').value),
-                    enable_history: document.getElementById('enableHistory').value === 'true',
-                    volume_level: newVolumeLevel,
-                    audio_language: document.getElementById('audioLanguage').value,
-                    autoplay_enabled: document.getElementById('autoplaySetting').value === 'true'
-                }};
-                
-                const response = await fetch('/api/settings/update', {{
-                    method: 'POST',
-                    headers: {{
-                        'Content-Type': 'application/json'
-                    }},
-                    body: JSON.stringify(settings)
-                }});
-                
-                const data = await response.json();
-                
-                if (data.success) {{
-                    volumeLevel = newVolumeLevel;
-                    sessionVolume = null;
-                    
-                    if (document.getElementById('volumeControl')) {{
-                        document.getElementById('volumeControl').value = volumeLevel;
-                    }}
-                    
-                    alert('Einstellungen gespeichert' + (data.restart_required ? '\\nServer-Neustart erforderlich!' : ''));
-                    loadSettings();
-                    hideSettingsPanel();
+                if (input.type === 'checkbox') {{
+                    value = input.checked;
+                }} else if (input.type === 'range') {{
+                    value = parseFloat(input.value);
+                }} else if (input.type === 'select-one') {{
+                    value = input.value;
                 }} else {{
-                    alert('Fehler: ' + data.error);
+                    value = input.value;
                 }}
-            }} catch (error) {{
-                alert('Fehler beim Speichern: ' + error);
+                
+                pluginSettings[key] = value;
+                console.log(`   📝 Plugin Setting: ${{key}} = ${{value}}`);
+            }});
+            
+            // 🔥 Plugin-Settings zu den Haupt-Settings hinzufügen
+            Object.assign(settings, pluginSettings);
+            
+            console.log('📤 Sende Settings an Server:', Object.keys(settings));
+            
+            const response = await fetch('/api/settings/update', {{
+                method: 'POST',
+                headers: {{
+                    'Content-Type': 'application/json'
+                }},
+                body: JSON.stringify(settings)
+            }});
+            
+            const data = await response.json();
+            
+            if (data.success) {{
+                volumeLevel = newVolumeLevel;
+                sessionVolume = null;
+                
+                if (document.getElementById('volumeControl')) {{
+                    document.getElementById('volumeControl').value = volumeLevel;
+                }}
+                
+                alert('Einstellungen gespeichert' + (data.restart_required ? '\\nServer-Neustart erforderlich!' : ''));
+                loadSettings();
+                hideSettingsPanel();
+            }} else {{
+                alert('Fehler: ' + data.error);
             }}
+        }} catch (error) {{
+            alert('Fehler beim Speichern: ' + error);
         }}
+    }}
         
         async function loadHistory() {{
             try {{
@@ -7338,23 +7701,31 @@ def generate_html_with_subgenres(categories, category_data, genres, years,
         }}
         
         function playMedia(filepath, title, category) {{
+            console.log('🎬 playMedia aufgerufen:', title, 'Kategorie:', category);
+            
             const ext = filepath.toLowerCase().split('.').pop();
             const audioExts = ['mp3', 'wav', 'flac', 'aac', 'ogg', 'm4a'];
-            const videoExts = ['mp4', 'mkv', 'avi', 'mov', 'wmv', 'webm', 'flv'];  // 1. FLV hinzufügen
+            const videoExts = ['mp4', 'mkv', 'avi', 'mov', 'wmv', 'webm', 'flv'];
             
-            // Füge diese globale Variable hinzu
+            // WICHTIG: currentMediaInfo setzen FÜR Plugin Hook
             currentMediaInfo = {{
                 filepath: filepath,
                 filename: title,
                 category: category
             }};
             
+            console.log('🎬 currentMediaInfo gesetzt:', currentMediaInfo);
+            
             if (audioExts.includes(ext)) {{
-                playAudio(filepath, title);
+                // 🔥 FIX: Füge category Parameter hinzu
+                if (category) {{
+                    playAudio(filepath, title, category);
+                }} else {{
+                    playAudio(filepath, title);
+                }}
             }} else if (videoExts.includes(ext)) {{
                 playVideo(filepath, title);
             }} else {{
-                // 2. openFile() entfernen und durch Fallback ersetzen
                 console.warn(`Unbekannter Dateityp .${{ext}}, versuche als Video...`);
                 playVideo(filepath, title);
             }}
@@ -7407,79 +7778,244 @@ def generate_html_with_subgenres(categories, category_data, genres, years,
         }}
         
         function playAudio(filepath, title) {{
-            if (currentAudio) {{
-                currentAudio.pause();
-                clearInterval(updateInterval);
+            console.log('🎵🎵🎵 PLAY AUDIO MIT PLUGIN HOOKS 🎵🎵🎵');
+            console.log('🔊 Datei:', title);
+            
+            // 🔥 WICHTIG: currentMediaInfo für Plugin Hook setzen
+            currentMediaInfo = {{
+                filepath: filepath,
+                filename: title,
+                category: currentMediaInfo ? currentMediaInfo.category : 'Musik'
+            }};
+            
+            console.log('🔊 currentMediaInfo gesetzt:', currentMediaInfo);
+            
+            // 🔥 KORREKTUR 1: Plugin Audio Control Hook prüfen
+            let allowPlay = true;
+            if (window.pluginAudioHooks && window.pluginAudioHooks.audioControl) {{
+                console.log('🔊 Plugin Audio Control Hook gefunden, prüfe...');
+                try {{
+                    allowPlay = window.pluginAudioHooks.audioControl('before_play', null, null);
+                    console.log('🔊 Audio Control Resultat:', allowPlay);
+                }} catch (e) {{
+                    console.error('🔊 Audio Control Hook Fehler:', e);
+                }}
             }}
             
+            if (!allowPlay) {{
+                console.log('🔊 Plugin blockiert Playback');
+                return;
+            }}
+            
+            // 🔥 KORREKTUR 2: Vorheriges Audio verwalten MIT Plugin
+            if (currentAudio) {{
+                console.log('🔊 Vorheriges Audio wird gestoppt...');
+                
+                // Plugin Hook für Audio-Stop
+                if (window.pluginAudioHooks && window.pluginAudioHooks.audioControl) {{
+                    try {{
+                        window.pluginAudioHooks.audioControl('stop', currentAudio, null);
+                    }} catch (e) {{
+                        console.error('🔊 Stop Hook Fehler:', e);
+                    }}
+                }}
+                
+                currentAudio.pause();
+                clearInterval(updateInterval);
+                
+                // Vorherige History speichern
+                if (currentMediaInfo) {{
+                    const duration = parseFloat(currentAudio.duration);
+                    const position = parseFloat(currentAudio.currentTime);
+                    if (!isNaN(duration) && !isNaN(position) && duration > 0) {{
+                        console.log(`📝 Speichere vorheriges Audio: ${{currentMediaInfo.filename}} bei ${{position.toFixed(1)}}s`);
+                        addToHistory(currentMediaInfo.filepath, currentMediaInfo.filename,
+                                   currentMediaInfo.category, position, duration, position >= duration);
+                    }}
+                }}
+            }}
+            
+            // Neues Audio erstellen
             const safePath = encodeURIComponent(filepath);
             currentAudio = new Audio(`/media?filepath=${{safePath}}`);
+            
+            console.log('🔊 Audio-Element erstellt, Plugin Hooks prüfen...');
+            console.log('🔊 Verfügbare Hooks:', Object.keys(window.pluginAudioHooks || {{}}));
+            
+            // 🔥 KORREKTUR 3: onAudioCreated Hook AUFRUFEN (wichtigster Teil!)
+            const audioMetadata = {{
+                filepath: filepath,
+                filename: title,
+                category: currentMediaInfo.category,
+                element: currentAudio
+            }};
+            
+            if (window.pluginAudioHooks && window.pluginAudioHooks.onAudioCreated) {{
+                console.log('🔊🔥 Rufe onAudioCreated Hook auf...');
+                try {{
+                    const hookResult = window.pluginAudioHooks.onAudioCreated(currentAudio, audioMetadata);
+                    console.log('🔊 Hook Resultat:', hookResult);
+                    
+                    // Falls Hook Crossfade vorbereitet hat, nicht direkt spielen
+                    if (hookResult && hookResult.action === 'fade_prepared') {{
+                        console.log('🔊 Crossfade vorbereitet - warte auf Start...');
+                        // Das Plugin startet den Crossfade selbst
+                        setupAudioForPlayback();
+                        return;
+                    }}
+                }} catch (e) {{
+                    console.error('🔊❌ Hook Fehler:', e);
+                }}
+            }} else {{
+                console.log('🔊⚠️ onAudioCreated Hook NICHT verfügbar!');
+                console.log('🔊 pluginAudioHooks:', window.pluginAudioHooks);
+                console.log('🔊 pluginAudioHooks.onAudioCreated:', window.pluginAudioHooks ? window.pluginAudioHooks.onAudioCreated : 'undefined');
+            }}
+            
+            // Normales Playback ohne Crossfade
+            setupAudioForPlayback();
+            
+            // Hilfsfunktion für Audio-Setup
+            function setupAudioForPlayback() {{
+                const actualVolume = getCurrentVolume();
+                currentAudio.volume = actualVolume;
+                
+                document.getElementById('audioPlayer').style.display = 'block';
+                document.getElementById('playerTitle').textContent = title;
+                document.getElementById('volumeControl').value = actualVolume;
+                
+                // Event Listener
+                currentAudio.addEventListener('loadedmetadata', function() {{
+                    console.log('🔊 Event: loadedmetadata - duration:', this.duration);
+                    updatePlayerTime();
+                    
+                    const duration = parseFloat(this.duration);
+                    if (currentMediaInfo && !isNaN(duration) && duration > 0) {{
+                        console.log(`🎵 Audio geladen: ${{title}}, Dauer: ${{duration.toFixed(2)}}s`);
+                        addToHistory(currentMediaInfo.filepath, currentMediaInfo.filename, 
+                                    currentMediaInfo.category, 0, duration, false);
+                    }}
+                }});
+                
+                currentAudio.addEventListener('canplay', function() {{
+                    console.log('🔊 Event: canplay - Audio kann abgespielt werden');
+                }});
+                
+                currentAudio.addEventListener('error', function(e) {{
+                    console.error('🔊 Event: ERROR', e);
+                    console.error('🔊 Audio error code:', this.error ? this.error.code : 'none');
+                }});
 
-            const actualVolume = getCurrentVolume();
-            currentAudio.volume = actualVolume;
-            
-            document.getElementById('audioPlayer').style.display = 'block';
-            document.getElementById('playerTitle').textContent = title;
-            document.getElementById('volumeControl').value = actualVolume;
-            
-            // Speichere erste History-Eintrag erst nach loadedmetadata
-            currentAudio.addEventListener('loadedmetadata', function() {{
-                updatePlayerTime();
-                
-                const duration = parseFloat(this.duration);
-                if (currentMediaInfo && !isNaN(duration) && duration > 0) {{
-                    console.log(`🎵 Audio geladen: ${{title}}, Dauer: ${{duration.toFixed(2)}}s`);
-                    addToHistory(currentMediaInfo.filepath, currentMediaInfo.filename, 
-                                currentMediaInfo.category, 0, duration, false);
-                }}
-            }});
-
-            currentAudio.addEventListener('ended', () => {{
-                isPlaying = false;
-                document.getElementById('playBtnIcon').className = 'fas fa-play';
-                updateProgress();
-                
-                const duration = parseFloat(currentAudio.duration);
-                const position = parseFloat(currentAudio.currentTime);
-                
-                if (currentMediaInfo && !isNaN(duration) && !isNaN(position) && duration > 0) {{
-                    console.log(`✅ Audio beendet: ${{currentMediaInfo.filename}}`);
-                    addToHistory(currentMediaInfo.filepath, currentMediaInfo.filename,
-                                currentMediaInfo.category, position, duration, true);
-                }}
-                
-                if (autoplayEnabled) {{
-                    setTimeout(playNextMedia, 1000);
-                }}
-            }});
-            
-            // Speichere alle 30 Sekunden
-            let lastSavedTime = 0;
-            currentAudio.addEventListener('timeupdate', function() {{
-                updateProgress();
-                
-                const currentTime = Math.floor(this.currentTime);
-                const duration = parseFloat(this.duration);
+                currentAudio.addEventListener('ended', () => {{
+                    console.log('🔊 Event: ended');
+                    isPlaying = false;
+                    document.getElementById('playBtnIcon').className = 'fas fa-play';
+                    updateProgress();
+                    
+                    const duration = parseFloat(currentAudio.duration);
+                    const position = parseFloat(currentAudio.currentTime);
+                    
+                    if (currentMediaInfo && !isNaN(duration) && !isNaN(position) && duration > 0) {{
+                        console.log(`✅ Audio beendet: ${{currentMediaInfo.filename}}`);
+                        addToHistory(currentMediaInfo.filepath, currentMediaInfo.filename,
+                                    currentMediaInfo.category, position, duration, true);
+                        
+                        // 🔥 Plugin Hook für Audio-Ende
+                        if (window.pluginAudioHooks && window.pluginAudioHooks.audioControl) {{
+                            try {{
+                                window.pluginAudioHooks.audioControl('ended', currentAudio, null);
+                            }} catch (e) {{
+                                console.error('🔊 Ended Hook Fehler:', e);
+                            }}
+                        }}
+                    }}
+                    
+                    if (autoplayEnabled) {{
+                        setTimeout(playNextMedia, 1000);
+                    }}
+                }});
                 
                 // Speichere alle 30 Sekunden
-                if (currentMediaInfo && !isNaN(duration) && duration > 0 && 
-                    currentTime > 0 && currentTime - lastSavedTime >= 30) {{
-                    lastSavedTime = currentTime;
-                    console.log(`💾 Auto-Save: ${{currentTime}}s / ${{duration.toFixed(0)}}s`);
-                    addToHistory(currentMediaInfo.filepath, currentMediaInfo.filename,
-                               currentMediaInfo.category, currentTime, duration, false);
-                }}
-            }});
+                let lastSavedTime = 0;
+                currentAudio.addEventListener('timeupdate', function() {{
+                    updateProgress();
+                    
+                    const currentTime = Math.floor(this.currentTime);
+                    const duration = parseFloat(this.duration);
+                    
+                    // Speichere alle 30 Sekunden
+                    if (currentMediaInfo && !isNaN(duration) && duration > 0 && 
+                        currentTime > 0 && currentTime - lastSavedTime >= 30) {{
+                        lastSavedTime = currentTime;
+                        addToHistory(currentMediaInfo.filepath, currentMediaInfo.filename,
+                                   currentMediaInfo.category, currentTime, duration, false);
+                    }}
+                }});
+                
+                // Volume Change Event für Plugin
+                currentAudio.addEventListener('volumechange', function() {{
+                    if (window.pluginAudioHooks && window.pluginAudioHooks.audioControl) {{
+                        try {{
+                            window.pluginAudioHooks.audioControl('volume', currentAudio, this.volume);
+                        }} catch (e) {{
+                            console.error('🔊 Volume Change Hook Fehler:', e);
+                        }}
+                    }}
+                }});
+                
+                console.log('🔊 Starte Audio.play()...');
+                currentAudio.play().then(() => {{
+                    console.log('🔊 Audio.play() SUCCESS');
+                    isPlaying = true;
+                    document.getElementById('playBtnIcon').className = 'fas fa-pause';
+                    updateInterval = setInterval(updateProgress, 1000);
+                    
+                    // 🔥 Plugin Hook für Play-Start
+                    if (window.pluginAudioHooks && window.pluginAudioHooks.audioControl) {{
+                        try {{
+                            window.pluginAudioHooks.audioControl('play', currentAudio, null);
+                        }} catch (e) {{
+                            console.error('🔊 Play Hook Fehler:', e);
+                        }}
+                    }}
+                }}).catch(e => {{
+                    console.error('🔊 Audio.play() ERROR:', e);
+                    console.error('🔊 Error name:', e.name);
+                    console.error('🔊 Error message:', e.message);
+                    alert('Fehler beim Laden der Audiodatei: ' + e.message);
+                }});
+            }}
             
-            currentAudio.play().then(() => {{
-                isPlaying = true;
-                document.getElementById('playBtnIcon').className = 'fas fa-pause';
-                updateInterval = setInterval(updateProgress, 1000);
-            }}).catch(e => {{
-                console.error('Fehler beim Abspielen:', e);
-                alert('Fehler beim Laden der Audiodatei.');
-            }});
+            console.log('🔊 playAudio Funktion beendet');
         }}
+
+        // 🔥 DEBUG: Plugin Status prüfen
+        function debugPluginStatus() {{
+            console.log('🔍 PLUGIN DEBUG STATUS:');
+            console.log('1. window.pluginAudioHooks:', window.pluginAudioHooks);
+            console.log('2. window.CrossfadePlugin:', window.CrossfadePlugin);
+            console.log('3. window.CrossfadePlugin?.enabled:', window.CrossfadePlugin?.enabled);
+            console.log('4. Verfügbare Hooks:', Object.keys(window.pluginAudioHooks || {{}}));
+            
+            // Test: Manuell Crossfade auslösen
+            if (window.CrossfadePlugin && window.CrossfadePlugin.startCrossfade) {{
+                console.log('✅ CrossfadePlugin hat startCrossfade() Methode');
+            }}
+            
+            // Test: Audio Element erstellen und Hook testen
+            const testAudio = new Audio();
+            if (window.pluginAudioHooks && window.pluginAudioHooks.onAudioCreated) {{
+                console.log('🔥 Teste onAudioCreated Hook...');
+                const result = window.pluginAudioHooks.onAudioCreated(testAudio, {{
+                    filename: 'Test Audio',
+                    category: 'Musik'
+                }});
+                console.log('🔥 Hook Resultat:', result);
+            }}
+        }}
+
+        // Nach 3 Sekunden debug ausführen (nur für Test)
+        setTimeout(debugPluginStatus, 3000);
         
         function playVideo(filepath, title) {{
             const videoPlayer = document.getElementById('videoPlayer');
@@ -7556,9 +8092,37 @@ def generate_html_with_subgenres(categories, category_data, genres, years,
         
         function togglePlay() {{
             if (!currentAudio) return;
+            
+            console.log('🔊 togglePlay aufgerufen, isPlaying:', isPlaying);
+            
+            // 🔥 Plugin Hook für Play/Pause
+            if (window.pluginAudioHooks && window.pluginAudioHooks.audioControl) {{
+                try {{
+                    const command = isPlaying ? 'pause' : 'play';
+                    const allow = window.pluginAudioHooks.audioControl(command, currentAudio, null);
+                    
+                    if (allow === false) {{
+                        console.log('🔊 Plugin blockiert Play/Pause');
+                        return;
+                    }}
+                }} catch (e) {{
+                    console.error('🔊 Play/Pause Hook Fehler:', e);
+                }}
+            }}
+            
             if (isPlaying) {{
                 currentAudio.pause();
                 document.getElementById('playBtnIcon').className = 'fas fa-play';
+                
+                // History bei Pause speichern
+                if (currentMediaInfo) {{
+                    const duration = parseFloat(currentAudio.duration);
+                    const position = parseFloat(currentAudio.currentTime);
+                    if (!isNaN(duration) && !isNaN(position) && duration > 0) {{
+                        addToHistory(currentMediaInfo.filepath, currentMediaInfo.filename,
+                                   currentMediaInfo.category, position, duration, false);
+                    }}
+                }}
             }} else {{
                 currentAudio.play();
                 document.getElementById('playBtnIcon').className = 'fas fa-pause';
@@ -8041,12 +8605,41 @@ def generate_html_with_subgenres(categories, category_data, genres, years,
                 }}
             }});
         }}
+
+// ============================================================================
+// PLUGIN HOOK SYSTEM (vom Server generiert)
+// ============================================================================
+
+// Plugin Hooks Container - WIRD VOM PLUGIN-JAVASCRIPT SELBST GEFÜLLT
+window.pluginAudioHooks = {{
+    // Wird von Plugins überschrieben
+}};
+
+// Plugin Settings Collector - WIRD VOM PLUGIN-JAVASCRIPT SELBST GEFÜLLT  
+window.collectPluginSettings = function() {{
+    // Leere Basis-Implementation
+    // Plugins überschreiben diese Funktion und fügen ihre Settings hinzu
+    const settings = {{}};
+    return settings;
+}};
+
+// Plugin Settings Applier - WIRD VOM PLUGIN-JAVASCRIPT SELBST GEFÜLLT
+window.applyPluginSettings = function(settings) {{
+    // Leere Basis-Implementation
+    // Plugins überschreiben diese Funktion und lesen ihre Settings
+}};
         
     </script>
 </body>
 </html>'''
-    
+    # DEBUG: Zeige was in plugin_settings_html ist
+    print(f"\n🔍 PLUGIN SETTINGS HTML INHALT (erste 500 Zeichen):")
+    print(plugin_settings_html[:500] if plugin_settings_html else "LEER!")    
+
+    # Formatierung mit .format() statt f-string
     return html_template.format(
+        plugin_header_js=plugin_header_js,
+        plugin_settings_html=plugin_settings_html,
         dropdown_categories=dropdown_categories,
         dropdown_genres=dropdown_genres,
         dropdown_years=dropdown_years,
@@ -8067,6 +8660,7 @@ def generate_html_with_subgenres(categories, category_data, genres, years,
         total_categories=total_categories,
         total_genres=total_genres,
         initial_filter_state_json=initial_filter_state_json,
+        cache_version=get_cache_version()
     )
 
 def generate_web_interface():
@@ -8790,7 +9384,13 @@ def main():
     print(f"🌐 Server: http://{SERVER_HOST}:{SERVER_PORT}")
     print("=" * 70)
     
-    print("🔍 Prüfe Abhängigkeiten...")
+    # 🔌 PLUGIN SYSTEM STATUS HINZUFÜGEN
+    print(f"\n🔌 PLUGIN SYSTEM:")
+    print(f"   ✅ {len(plugin_manager.plugins)} Plugin(s) geladen")
+    for name, plugin in plugin_manager.plugins.items():
+        print(f"   • {name}: {plugin.name} v{getattr(plugin, 'version', '1.0')}")
+    
+    print("\n🔍 Prüfe Abhängigkeiten...")
     
     # FFmpeg prüfen
     try:
@@ -8893,6 +9493,18 @@ def main():
     print("   5. ✅ Autoplay Boundary Fix (stoppt nach letztem Medium)")
     print("   6. ✅ Audio-Lautstärkeregler mit Persistenz")
     print("   7. ✅ MKV Audio-Sprache Einstellung")
+    
+    # 🔌 PLUGIN FEATURES ANZEIGEN
+    print("   8. 🔌 PLUGIN SYSTEM:")
+    for name, plugin in plugin_manager.plugins.items():
+        print(f"      • {name}: {plugin.name}")
+        # Besondere Features von Plugins anzeigen
+        if name == 'crossfade':
+            print(f"         - Audio Crossfade (Überblendung)")
+            print(f"         - Verschiedene Fade-Kurven")
+        elif name == 'test':
+            print(f"         - Test-Funktionalität")
+    
     print("=" * 70)
     
     # Network Info falls aktiv
@@ -8918,6 +9530,7 @@ def main():
     print("   • Oben rechts: Nur EIN Such-Button (Single Filter)")
     print("   • Audio-Player hat Lautstärkeregler mit Speicherung")
     print("   • History zeigt zuletzt gesehene Medien")
+    print("   • PLUGINS: Crossfade für Audio-Überblendung")
     
     print("=" * 70)
     print("💡 Drücke STRG+C zum Beenden mit automatischem Cleanup")
