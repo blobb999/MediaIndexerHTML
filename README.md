@@ -49,7 +49,7 @@ VLC/MPC-HC:
 
     ❌ Kein Multi-User
 
-DEIN SYSTEM:
+MediaIndexerHTML:
 
     ✅ Web-UI (moderne SPA)
 
