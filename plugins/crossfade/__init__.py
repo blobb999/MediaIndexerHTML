@@ -29,8 +29,14 @@ class CrossfadePlugin:
                 self.enabled = bool(value) if value is not None else True
             elif key == 'plugin.crossfade.duration':
                 try:
-                    self.fade_duration = float(value) if value is not None else 3.0
-                except:
+                    if value is not None:
+                        self.fade_duration = float(value)
+                        print(f"🔧 LOADED fade_duration: {self.fade_duration}s (from value: {value})")
+                    else:
+                        self.fade_duration = 3.0
+                        print(f"🔧 DEFAULT fade_duration: 3.0s (value was None)")
+                except Exception as e:
+                    print(f"🔧 ERROR loading fade_duration: {e}")
                     self.fade_duration = 3.0
             elif key == 'plugin.crossfade.curve':
                 if value in ['linear', 'exponential', 'logarithmic']:
@@ -40,8 +46,9 @@ class CrossfadePlugin:
             elif key == 'plugin.crossfade.preload':
                 self.preload_next = bool(value) if value is not None else True
         
+        print(f"🥄 Final loaded settings: enabled={self.enabled}, duration={self.fade_duration}s, curve={self.fade_curve}")
         return True
-    
+
     def register(self, plugin_manager):
         """Registriert sich beim Plugin Manager."""
         print(f"🎵 {self.name}: Registriere Hooks...")
@@ -53,9 +60,6 @@ class CrossfadePlugin:
         
         print(f"✅ {self.name}: Hooks registriert - LÖFFEL-SYSTEM aktiv!")
         return True
-    
-    def inject_javascript(self):
-        """JavaScript-Code für Crossfade - LÖFFEL-ÜBERGABE VERSION."""
         
     def inject_javascript(self):
         """JavaScript-Code für Crossfade - LÖFFEL-ÜBERGABE VERSION."""
@@ -131,10 +135,10 @@ class CrossfadePlugin:
     
     // 3. PLUGIN IMPLEMENTATION MIT LÖFFEL-SYSTEM
     const CrossfadePlugin = {{
-        enabled: {str(self.enabled).lower()},
-        fadeDuration: {self.fade_duration},
-        fadeCurve: "{self.fade_curve}",
-        preloadNext: {str(self.preload_next).lower()},
+        enabled: null,  // 🔧 Wird aus DOM geladen
+        fadeDuration: null,  // 🔧 Wird aus DOM geladen
+        fadeCurve: null,  // 🔧 Wird aus DOM geladen
+        preloadNext: null,  // 🔧 Wird aus DOM geladen
         
         // 🥄 LÖFFEL-STATE: Nur EIN Player hat den Löffel!
         currentAudio: null,      // 🥄 Aktueller Löffel-Besitzer
@@ -288,7 +292,9 @@ class CrossfadePlugin:
         // 🔧 NEUE FUNKTION: Einstellungen aus dem DOM laden
         loadSettingsFromDOM: function() {{
             try {{
-                // 1. ENabled checkbox
+                console.log('🥄 Loading settings from DOM...');
+                
+                // 1. Enabled checkbox
                 const enabledCheckbox = document.querySelector('[data-plugin-setting="plugin.crossfade.enabled"]');
                 if (enabledCheckbox && enabledCheckbox.type === 'checkbox') {{
                     this.enabled = enabledCheckbox.checked;
@@ -300,6 +306,13 @@ class CrossfadePlugin:
                 if (durationSlider && durationSlider.type === 'range') {{
                     this.fadeDuration = parseFloat(durationSlider.value);
                     console.log('🥄 Fade Duration from DOM:', this.fadeDuration, 's');
+                    
+                    // 🔥 KRITISCH: Auch den Text-Display aktualisieren!
+                    const durationDisplay = document.getElementById('crossfadeDurationValue');
+                    if (durationDisplay) {{
+                        durationDisplay.textContent = this.fadeDuration + 's';
+                        console.log('🥄 ✅ Duration display updated to:', this.fadeDuration + 's');
+                    }}
                 }}
                 
                 // 3. Fade Curve select
@@ -327,6 +340,37 @@ class CrossfadePlugin:
                 console.error('🥄 Error loading settings from DOM:', error);
             }}
         }},
+
+        // 🔧 Settings nach dem Laden aktualisieren (OHNE Hook zu stören!)
+        reloadSettingsFromDOM: function() {{
+            console.log('🥄 Reloading settings from DOM (post-load)...');
+            
+            const durationSlider = document.querySelector('[data-plugin-setting="plugin.crossfade.duration"]');
+            const enabledCheckbox = document.querySelector('[data-plugin-setting="plugin.crossfade.enabled"]');
+            const curveSelect = document.querySelector('[data-plugin-setting="plugin.crossfade.curve"]');
+            const preloadCheckbox = document.querySelector('[data-plugin-setting="plugin.crossfade.preload"]');
+            
+            if (durationSlider) {{
+                this.fadeDuration = parseFloat(durationSlider.value);
+                console.log('🥄 ✅ Updated fadeDuration:', this.fadeDuration);
+            }}
+            if (enabledCheckbox) {{
+                this.enabled = enabledCheckbox.checked;
+            }}
+            if (curveSelect) {{
+                this.fadeCurve = curveSelect.value;
+            }}
+            if (preloadCheckbox) {{
+                this.preloadNext = preloadCheckbox.checked;
+            }}
+            
+            console.log('🥄 Settings reloaded:', {{
+                enabled: this.enabled,
+                fadeDuration: this.fadeDuration,
+                fadeCurve: this.fadeCurve,
+                preloadNext: this.preloadNext
+            }});
+        }},
         
         // Initialize
         initialize: function() {{
@@ -334,6 +378,19 @@ class CrossfadePlugin:
 
             // 🔧 KORREKTUR: EINSTELLUNGEN DYNAMISCH AUS DEM UI LADEN!
             this.loadSettingsFromDOM();
+            
+            // Fallbacks setzen falls DOM leer war
+            if (this.enabled === null) this.enabled = {str(self.enabled).lower()};
+            if (this.fadeDuration === null) this.fadeDuration = {self.fade_duration};
+            if (this.fadeCurve === null) this.fadeCurve = "{self.fade_curve}";
+            if (this.preloadNext === null) this.preloadNext = {str(self.preload_next).lower()};
+            
+            console.log('🥄 Final settings after init:', {{
+                enabled: this.enabled,
+                fadeDuration: this.fadeDuration,
+                fadeCurve: this.fadeCurve,
+                preloadNext: this.preloadNext
+            }});
             
             try {{
                 // Find UI elements
@@ -367,19 +424,26 @@ class CrossfadePlugin:
                     }});
                 }}
                 
-                // Override other functions
-                if (originals.togglePlay) {{
-                    window.togglePlay = this.handleTogglePlay.bind(this);
-                }}
-                
-                if (originals.closeAudioPlayer) {{
-                    window.closeAudioPlayer = this.handleCloseAudioPlayer.bind(this);
-                }}
-                
+                // Override other functions - OHNE originals-Check!
+                console.log('🥄 Overriding togglePlay...');
+                const self = this;
+                window.togglePlay = function() {{
+                    console.log('🥄 togglePlay wrapper called');
+                    self.handleTogglePlay();
+                }};
+                console.log('🥄 ✅ togglePlay overridden');
+
+                console.log('🥄 Overriding closeAudioPlayer...');
+                window.closeAudioPlayer = function() {{
+                    console.log('🥄 closeAudioPlayer wrapper called');
+                    self.handleCloseAudioPlayer();
+                }};
+                console.log('🥄 ✅ closeAudioPlayer overridden');
+
                 if (originals.seekAudio) {{
                     window.seekAudio = this.handleSeek.bind(this);
                 }}
-                
+
                 if (originals.playNextMedia) {{
                     window.playNextMedia = this.handlePlayNextMedia.bind(this);
                 }}
@@ -983,41 +1047,60 @@ class CrossfadePlugin:
             }}
         }},
         
-        // 🥄 AUDIO PLAYER SCHLIESSEN - ALLE LÖFFEL ABGEBEN!
+    // 🥄 AUDIO PLAYER SCHLIESSEN - ALLE LÖFFEL ABGEBEN!
         handleCloseAudioPlayer: function() {{
-            console.log('🥄 Closing audio player - ALLE LÖFFEL ABGEBEN!');
+            console.log('🥄 🛑 CLOSING PLAYER - Stopping ALL audio');
             
-            // UI Updates stoppen
+            // 1. UI Updates sofort stoppen
             this.stopUIUpdates();
             
-            // 🥄 Aktuellen Löffel-Besitzer stoppen
-            if (this.currentAudio) {{
-                this.completelyStopAudio(this.currentAudio);
-                this.currentAudio = null;
-            }}
-            
-            // 🥄 Nächsten in Warteschlange stoppen
-            if (this.nextAudio) {{
-                this.completelyStopAudio(this.nextAudio);
-                this.nextAudio = null;
-            }}
-            
+            // 2. Crossfade-Flag setzen
             this.isCrossfading = false;
+            
+            // 3. ALLE Audio-Elemente finden und BRUTAL stoppen
+            const audioToStop = [];
+            if (this.currentAudio) audioToStop.push(this.currentAudio);
+            if (this.nextAudio) audioToStop.push(this.nextAudio);
+            
+            console.log('🥄 Stopping', audioToStop.length, 'audio elements');
+            
+            audioToStop.forEach((audio, i) => {{
+                if (audio) {{
+                    console.log(`🥄 Stopping audio ${{i + 1}}`);
+                    try {{
+                        audio.pause();
+                        audio.volume = 0;
+                        audio.currentTime = 0;
+                        // BEIM SCHLIESSEN dürfen wir brutal sein:
+                        audio.src = '';
+                        audio.load();
+                    }} catch (e) {{
+                        console.log('🥄 Stop error (ignored):', e);
+                    }}
+                }}
+            }});
+            
+            // 4. State zurücksetzen
+            this.currentAudio = null;
+            this.nextAudio = null;
             this.nextTitle = null;
+            this.isCrossfading = false;
             
-            // 🥄 Löffel-Log leeren
-            this.spoonLog = [];
-            this.logSpoonTransfer('ALL Players', 'NONE', 'PLAYER CLOSED');
-            
+            // 5. UI zurücksetzen
             if (this.ui.audioPlayer) {{
                 this.ui.audioPlayer.style.display = 'none';
             }}
-            
             if (this.ui.playBtnIcon) {{
                 this.ui.playBtnIcon.className = 'fas fa-play';
             }}
+            if (this.ui.progressBar) {{
+                this.ui.progressBar.style.width = '0%';
+            }}
+            if (this.ui.playerTime) {{
+                this.ui.playerTime.textContent = '00:00 / 00:00';
+            }}
             
-            console.log('🥄 Alle Löffel wurden abgegeben! System bereit für Neustart.');
+            console.log('🥄 ✅ Player closed, all audio stopped');
         }},
         
         handleSeek: function(event) {{
@@ -1079,34 +1162,38 @@ class CrossfadePlugin:
             }}
         }},
         
+        // Settings update
         updateSettings: function(settings) {{
-            console.log('🥄 Updating settings from API:', settings);
+            console.log('🥄 Updating settings:', settings);
             
-            if (settings.enabled !== undefined) {{
-                this.enabled = Boolean(settings.enabled);
-                console.log('🥄 Enabled updated to:', this.enabled);
-            }}
+            if (settings.enabled !== undefined) this.enabled = settings.enabled;
             
             if (settings.fadeDuration !== undefined) {{
                 this.fadeDuration = parseFloat(settings.fadeDuration);
-                console.log('🥄 Fade Duration updated to:', this.fadeDuration, 's');
+                console.log('🥄 Updated fadeDuration to:', this.fadeDuration);
                 
-                // 🔧 WICHTIG: SICHERSTELLEN, DASS fadeDuration EINE GÜLTIGE ZAHL IST
-                if (isNaN(this.fadeDuration) || this.fadeDuration <= 0) {{
-                    console.log('🥄 WARNING: Invalid fadeDuration, setting to 3.0');
-                    this.fadeDuration = 3.0;
+                // 🔧 UI auch updaten!
+                const durationSlider = document.querySelector('[data-plugin-setting="plugin.crossfade.duration"]');
+                const durationDisplay = document.getElementById('crossfadeDurationValue');
+                
+                if (durationSlider) {{
+                    durationSlider.value = this.fadeDuration;
+                }}
+                if (durationDisplay) {{
+                    durationDisplay.textContent = this.fadeDuration + 's';
+                    console.log('🥄 ✅ Duration display updated to:', this.fadeDuration + 's');
                 }}
             }}
             
-            if (settings.fadeCurve !== undefined) {{
-                this.fadeCurve = String(settings.fadeCurve);
-                console.log('🥄 Fade Curve updated to:', this.fadeCurve);
-            }}
+            if (settings.fadeCurve !== undefined) this.fadeCurve = settings.fadeCurve;
+            if (settings.preloadNext !== undefined) this.preloadNext = settings.preloadNext;
             
-            if (settings.preloadNext !== undefined) {{
-                this.preloadNext = Boolean(settings.preloadNext);
-                console.log('🥄 Preload updated to:', this.preloadNext);
-            }}
+            console.log('🥄 ✅ Settings updated:', {{
+                enabled: this.enabled,
+                fadeDuration: this.fadeDuration,
+                fadeCurve: this.fadeCurve,
+                preloadNext: this.preloadNext
+            }});
             
             // 🔧 WICHTIG: AUCH DAS DOM-UI AKTUALISIEREN
             this.updateDOMSettings();
@@ -1209,19 +1296,12 @@ class CrossfadePlugin:
     
     console.log('✅ Settings integration ready');
     
-    // 6. INITIALIZE
+    // 6. INITIALIZE - SOFORT!
+    console.log('🥄 Checking document state:', document.readyState);
+
     function initialize() {{
-        console.log('🥄 Starting LÖFFEL-SYSTEM initialization...');
-        
-        // 🔧 KORREKTUR: SICHERSTELLEN DASS ORIGINALE GESPEICHERT WURDEN
-        if (!originals.playAudio && window.playAudio) {{
-            originals.playAudio = window.playAudio;
-            console.log('🎵 Saved original playAudio function');
-        }}
-        
+        console.log('🥄 🔥 INITIALIZE CALLED!');
         if (window.CrossfadePlugin) {{
-            // 🔧 WICHTIG: Settings zuerst laden
-            window.CrossfadePlugin.loadSettingsFromDOM();
             window.CrossfadePlugin.initialize();
             
             // Replace temporary wrapper with real handler
@@ -1229,40 +1309,52 @@ class CrossfadePlugin:
                 return window.CrossfadePlugin.handlePlayAudio(filepath, title, category);
             }};
             
-            console.log('✅ playAudio wrapper replaced with LÖFFEL handler');
-            
-            // 🔧 WENN EINSTELLUNGEN VOM SERVER GELADEN WURDEN, DIESE ANWENDEN
-            if (window.settingsLoaded) {{
-                console.log('🥄 Server settings already loaded, applying them...');
-                // Die Einstellungen werden durch window.applyPluginSettings() angewendet
-            }}
+            console.log('✅ playAudio wrapper replaced');
+        }} else {{
+            console.log('❌ CrossfadePlugin not found!');
         }}
     }}
-    
-    // Start initialization
+
+    // SOFORT ausführen wenn DOM ready
     if (document.readyState === 'loading') {{
-        document.addEventListener('DOMContentLoaded', function() {{
-            console.log('🥄 DOM fully loaded, initializing LÖFFEL-SYSTEM...');
-            
-            // Warte kurz, bis alle DOM-Elemente geladen sind
-            setTimeout(function() {{
-                initialize();
-            }}, 100);
+        console.log('🥄 Document loading, waiting for DOMContentLoaded');
+        document.addEventListener('DOMContentLoaded', () => {{
+            console.log('🥄 DOMContentLoaded fired');
+            initialize();
         }});
     }} else {{
-        // DOM ist bereits geladen
-        setTimeout(function() {{
-            initialize();
-        }}, 100);
+        console.log('🥄 Document already ready, initializing now');
+        initialize();
     }}
-    
-    // Fallback initialization
-    setTimeout(initialize, 500);
+
+    // Fallback
+    setTimeout(() => {{
+        console.log('🥄 Fallback initialization check');
+        if (!window.CrossfadePlugin || !window.CrossfadePlugin.ui.titleElement) {{
+            console.log('🥄 Fallback: Re-initializing');
+            initialize();
+        }}
+    }}, 500);
     
 }})();
 
 console.log('✅ {self.name} v{self.version}: LÖFFEL-SYSTEM fully loaded!');
 console.log('🥄 MERKE: Immer nur EIN Löffel, immer weitergeben!');
+
+// 🔥 SOFORT INITIALISIEREN - NICHT WARTEN!
+console.log('🥄 Starting immediate initialization...');
+if (window.CrossfadePlugin) {{
+    console.log('🥄 CrossfadePlugin found, calling initialize()');
+    window.CrossfadePlugin.initialize();
+    
+    // playAudio override
+    window.playAudio = function(filepath, title, category) {{
+        return window.CrossfadePlugin.handlePlayAudio(filepath, title, category);
+    }};
+    console.log('🥄 ✅ Functions overridden');
+}} else {{
+    console.log('🥄 ❌ CrossfadePlugin NOT FOUND!');
+}}
 </script>'''
         
         return js_code
@@ -1283,7 +1375,7 @@ console.log('🥄 MERKE: Immer nur EIN Löffel, immer weitergeben!');
             <small class="text-muted">Nahtlose Überblendung zwischen Audio-Tracks</small>
         </div>
         <div class="settings-group">
-            <label class="settings-label">Überblend-Dauer: <span id="crossfadeDurationValue">{self.fade_duration}s</span></label>
+            <label class="settings-label">Überblend-Dauer: <span id="crossfadeDurationValue"></span></label>
             <input type="range" data-plugin-setting="plugin.crossfade.duration" 
                    class="settings-slider" min="1" max="10" step="0.5" 
                    value="{self.fade_duration}" 
@@ -1316,50 +1408,82 @@ console.log('🥄 MERKE: Immer nur EIN Löffel, immer weitergeben!');
             </small>
         </div>
         <script>
-            // 🔧 LIVE-UPDATE für die Status-Anzeige
-            function updateCrossfadeStatus() {{
-                const enabledCheckbox = document.querySelector('[data-plugin-setting="plugin.crossfade.enabled"]');
-                const durationSlider = document.querySelector('[data-plugin-setting="plugin.crossfade.duration"]');
-                const curveSelect = document.querySelector('[data-plugin-setting="plugin.crossfade.curve"]');
+        // 🔧 LIVE-UPDATE für die Status-Anzeige
+        function updateCrossfadeStatus() {{
+            console.log('🥄 updateCrossfadeStatus() called');
+            const enabledCheckbox = document.querySelector('[data-plugin-setting="plugin.crossfade.enabled"]');
+            const durationSlider = document.querySelector('[data-plugin-setting="plugin.crossfade.duration"]');
+            const curveSelect = document.querySelector('[data-plugin-setting="plugin.crossfade.curve"]');
+            
+            console.log('🥄 Slider value:', durationSlider ? durationSlider.value : 'NOT FOUND');
+            
+            if (enabledCheckbox && durationSlider && curveSelect) {{
+                const status = document.getElementById('crossfadeStatus');
+                const currentDuration = document.getElementById('currentFadeDuration');
+                const currentCurve = document.getElementById('currentFadeCurve');
                 
-                if (enabledCheckbox && durationSlider && curveSelect) {{
-                    const status = document.getElementById('crossfadeStatus');
-                    const currentDuration = document.getElementById('currentFadeDuration');
-                    const currentCurve = document.getElementById('currentFadeCurve');
-                    
-                    if (status) {{
-                        status.textContent = enabledCheckbox.checked ? "Aktiv 🥄" : "Inaktiv ❌";
-                        status.style.color = enabledCheckbox.checked ? "#2ecc71" : "#e74c3c";
-                    }}
-                    if (currentDuration) {{
-                        currentDuration.textContent = durationSlider.value;
-                    }}
-                    if (currentCurve) {{
-                        currentCurve.textContent = curveSelect.options[curveSelect.selectedIndex].text;
-                    }}
+                if (status) {{
+                    status.textContent = enabledCheckbox.checked ? "Aktiv 🥄" : "Inaktiv ❌";
+                    status.style.color = enabledCheckbox.checked ? "#2ecc71" : "#e74c3c";
+                }}
+                if (currentDuration) {{
+                    currentDuration.textContent = durationSlider.value;
+                }}
+                if (currentCurve) {{
+                    currentCurve.textContent = curveSelect.options[curveSelect.selectedIndex].text;
+                }}
+                
+                // 🔥 KRITISCH: Auch den Haupttext beim Slider aktualisieren!
+                const durationDisplay = document.getElementById('crossfadeDurationValue');
+                if (durationDisplay) {{
+                    durationDisplay.textContent = durationSlider.value + 's';
                 }}
             }}
+        }}
+        
+        // Event-Listener für Live-Updates
+        document.addEventListener('DOMContentLoaded', function() {{
+            const enabledCheckbox = document.querySelector('[data-plugin-setting="plugin.crossfade.enabled"]');
+            const durationSlider = document.querySelector('[data-plugin-setting="plugin.crossfade.duration"]');
+            const curveSelect = document.querySelector('[data-plugin-setting="plugin.crossfade.curve"]');
             
-            // Event-Listener für Live-Updates
-            document.addEventListener('DOMContentLoaded', function() {{
-                const enabledCheckbox = document.querySelector('[data-plugin-setting="plugin.crossfade.enabled"]');
-                const durationSlider = document.querySelector('[data-plugin-setting="plugin.crossfade.duration"]');
-                const curveSelect = document.querySelector('[data-plugin-setting="plugin.crossfade.curve"]');
+            if (enabledCheckbox) {{
+                enabledCheckbox.addEventListener('change', updateCrossfadeStatus);
+            }}
+            if (durationSlider) {{
+                durationSlider.addEventListener('input', updateCrossfadeStatus);
+            }}
+            if (curveSelect) {{
+                curveSelect.addEventListener('change', updateCrossfadeStatus);
+            }}
+        }});
+        
+        // 🔥 NEU: Warte auf Settings-Laden, DANN update
+        window.addEventListener('settingsLoaded', function() {{
+            console.log('🥄 settingsLoaded event received, updating status');
                 
-                if (enabledCheckbox) {{
-                    enabledCheckbox.addEventListener('change', updateCrossfadeStatus);
-                }}
-                if (durationSlider) {{
-                    durationSlider.addEventListener('input', updateCrossfadeStatus);
-                }}
-                if (curveSelect) {{
-                    curveSelect.addEventListener('change', updateCrossfadeStatus);
-                }}
+            // 🔥 WICHTIG: Settings im Plugin-Objekt aktualisieren!
+            if (window.CrossfadePlugin && window.CrossfadePlugin.reloadSettingsFromDOM) {{
+                    window.CrossfadePlugin.reloadSettingsFromDOM();
+            }}
                 
-                // Initial update
-                updateCrossfadeStatus();
-            }});
-        </script>
+            // DANN das UI aktualisieren
+            updateCrossfadeStatus();
+        }});
+            
+        // 🔥 FALLBACK: Falls kein Event kommt, nach 500ms trotzdem updaten
+        setTimeout(function() {{
+            console.log('🥄 Fallback update after 500ms');
+                
+            // 🔥 WICHTIG: Settings im Plugin-Objekt aktualisieren!
+            if (window.CrossfadePlugin && window.CrossfadePlugin.reloadSettingsFromDOM) {{
+                window.CrossfadePlugin.reloadSettingsFromDOM();
+            }}
+                
+            // DANN das UI aktualisieren
+            updateCrossfadeStatus();
+        }}, 500);
+    </script>
     </div>
     '''
         
